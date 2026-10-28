@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projet Three-Tier - Configuration complète (Packet Tracer)</title>
+<style>
+:root{--bg:#f3f6f8;--panel:#fff;--ink:#17252f;--mute:#5b6b76;--line:#d3dde3;--acc:#0b6e8a;--code:#0f1d26;--codeink:#d8e8ef}
+@media (prefers-color-scheme:dark){:root{--bg:#0d161c;--panel:#142029;--ink:#e3edf2;--mute:#8fa3af;--line:#25363f;--acc:#4fc0dd;--code:#08111b;--codeink:#d8e8ef}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:22px 20px 8px;max-width:1100px;margin:auto}
+h1{font-size:1.5rem;margin:0 0 4px}
+header p{margin:0;color:var(--mute)}
+nav{max-width:1100px;margin:14px auto 0;padding:0 20px;display:flex;flex-wrap:wrap;gap:6px}
+nav button{border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:7px 14px;border-radius:6px;font:inherit;cursor:pointer}
+nav button[aria-selected=true]{background:var(--acc);border-color:var(--acc);color:#fff}
+nav button:focus-visible,.cp:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+main{max-width:1100px;margin:16px auto 60px;padding:0 20px}
+.blk{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:16px;overflow:hidden}
+.bh{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;border-bottom:1px solid var(--line);font-weight:600}
+.cp{border:1px solid var(--line);background:transparent;color:var(--acc);border-radius:5px;padding:4px 12px;font:inherit;font-size:.85rem;cursor:pointer}
+pre{margin:0;padding:14px;background:var(--code,#0f1d26);color:var(--codeink);overflow-x:auto;font:13px/1.5 ui-monospace,Consolas,monospace;max-height:560px}
+pre.txt{background:var(--panel);color:var(--ink);max-height:none}
+</style>
+</head>
+<body>
+<header>
+<h1>Projet Three-Tier : configuration complète</h1>
+<p>Packet Tracer · TP M201 « Sécuriser un réseau local » + présentation SWITCH · ISTA IDOSR</p>
+</header>
+<nav id="tabs" role="tablist"></nav>
+<main id="out"></main>
+
+<script>
+/* ---------- Helpers (blocs répétés) ---------- */
+const PW="ISTA.IDOSR";
+const base=(h,v="0 15")=>`enable
+configure terminal
+hostname ${h}
+no ip domain-lookup
+enable password ${PW}
+service password-encryption
+banner motd #Acces reserve - ISTA IDOSR#
+line console 0
+ password ${PW}
+ login
+ logging synchronous
+ exit
+line vty ${v}
+ password ${PW}
+ login
+ logging synchronous
+ exit
+`;
+const vtp=m=>`vtp mode ${m}\nvtp domain ISTA.MA\nvtp password ${PW}\n`;
+const trunk=(i,d,x="")=>`interface ${i}
+ description ${d}
+ switchport mode trunk
+ switchport trunk native vlan 333
+ switchport nonegotiate
+${x} exit
+`;
+const ec=(r,d,n,m)=>`interface range ${r}
+ description ${d}
+ switchport mode trunk
+ switchport trunk native vlan 333
+ switchport nonegotiate
+ channel-group ${n} mode ${m}
+ exit
+interface port-channel ${n}
+ switchport mode trunk
+ switchport trunk native vlan 333
+ no shutdown
+ exit
+`;
+const unused=r=>`interface range ${r}
+ switchport mode access
+ switchport access vlan 999
+ shutdown
+ exit
+`;
+const svi=(v,ip,pr,hp)=>`interface vlan ${v}
+ description ${v==99?"Management SVI":"Gateway VLAN"+v}
+ ip address 192.168.${v}.${ip} 255.255.255.0
+${hp?" ip helper-address "+hp+"\n":""} standby ${v} ip 192.168.${v}.1
+ standby ${v} priority ${pr}
+ standby ${v} preempt
+ no shutdown
+ exit
+`;
+const ospf=(id,link,pas)=>`router ospf 1
+ router-id ${id}
+ passive-interface default
+ no passive-interface gi1/0/1
+ network ${link} 0.0.0.3 area 0
+ network 192.168.10.0 0.0.0.255 area 0
+ network 192.168.20.0 0.0.0.255 area 0
+ network 192.168.30.0 0.0.0.255 area 0
+ network 192.168.99.0 0.0.0.255 area 0
+ exit
+`;
+const mgmt=ip=>`interface vlan 99
+ description Management SVI
+ ip address 192.168.99.${ip} 255.255.255.0
+ no shutdown
+ exit
+ip default-gateway 192.168.99.1
+`;
+const snoop=`ip dhcp snooping
+ip dhcp snooping vlan 10,20,30
+no ip dhcp snooping information option
+interface range fa0/1-2
+ ip dhcp snooping trust
+ exit
+`;
+const save="end\ncopy running-config startup-config\n";
+const cfgt="configure terminal\n";
+const PD=x=>trunk("gi1/0/4","Link to S3",x);
+/* ports d'accès */
+const acc=(i,pc,v,max,viol,sticky,extra="",snp=true)=>`interface ${i}
+ description Link to ${pc}
+ switchport mode access
+ switchport access vlan ${v}
+ switchport port-security
+ switchport port-security maximum ${max}
+ switchport port-security violation ${viol}
+${sticky?" switchport port-security mac-address sticky\n":""}${extra} spanning-tree portfast
+ spanning-tree bpduguard enable
+${snp?" ip dhcp snooping limit rate 5\n":""} exit
+`;
+const uplinks=(first)=>trunk("fa0/1","Link to S3"," spanning-tree cost 5\n")+trunk("fa0/2","Link to S4")+"spanning-tree mode rapid-pvst\n"+save;
+const dist=(h,n,ecm,ip)=>[
+ ["Phase 1",base(h)+vtp("client")+trunk("gi1/0/1","Link to S1")+trunk("gi1/0/2","Link to S2")
+  +ec("gi1/0/3-5","Po34 vers S"+(n==3?4:3),34,ecm)
+  +["6:S5","7:S6","8:S7"].map(s=>{const[p,d]=s.split(":");return trunk("gi1/0/"+p,"Link to "+d," spanning-tree guard root\n")}).join("")
+  +"spanning-tree mode rapid-pvst\n"+save],
+ ["Phase 2",cfgt+mgmt(ip)+unused("gi1/0/9-24")+save]];
+
+/* ---------- Données ---------- */
+const D={};
+D["Plan"]=[["Plan d'adressage",`VLAN 10  Informatique  192.168.10.0/24  VIP HSRP .1  S1=.2  S2=.3
+VLAN 20  Comptabilite  192.168.20.0/24  VIP HSRP .1  S1=.2  S2=.3
+VLAN 30  Serveurs      192.168.30.0/24  VIP HSRP .1  S1=.2  S2=.3
+VLAN 99  Management    192.168.99.0/24  VIP HSRP .1  S1=.2  S2=.3
+         S3=.4  S4=.5  S5=.6  S6=.7  S7=.8   (passerelle .1)
+VLAN 333 Native (trunks)      VLAN 999 ParkingLot (ports inutilises)
+
+Liens routes :
+  R2 Gi0/0 (10.0.0.2/30)  <->  R1 Gi0/0 (10.0.0.1/30)
+  R1 Gi0/1 (10.0.1.1/30)  <->  S1 Gi1/0/1 (10.0.1.2/30)
+  R1 Gi0/2 (10.0.2.1/30)  <->  S2 Gi1/0/1 (10.0.2.2/30)
+  R2 Loopback0 = 10.10.1.1/24 (simule Internet)
+
+Hotes :
+  PC0     -> S5 Fa0/3  VLAN 10  (DHCP)
+  PC1     -> S5 Fa0/4  VLAN 20  (DHCP)
+  PC2     -> S6 Fa0/3  VLAN 20  (DHCP)
+  Server0 -> S7 Fa0/5  VLAN 30  IP fixe 192.168.30.10/24  GW 192.168.30.1  DNS 8.8.8.8`,1],
+["Plan de câblage (à adapter)",`S1 Gi1/0/2-3 <-> S2 Gi1/0/2-3   Port-channel 12 (LACP)
+S1 Gi1/0/4   <-> S3 Gi1/0/1     S1 Gi1/0/5 <-> S4 Gi1/0/1
+S2 Gi1/0/4   <-> S3 Gi1/0/2     S2 Gi1/0/5 <-> S4 Gi1/0/2
+S3 Gi1/0/3-5 <-> S4 Gi1/0/3-5   Port-channel 34 (PAgP)
+S3 Gi1/0/6 <-> S5 Fa0/1   S3 Gi1/0/7 <-> S6 Fa0/1   S3 Gi1/0/8 <-> S7 Fa0/1
+S4 Gi1/0/6 <-> S5 Fa0/2   S4 Gi1/0/7 <-> S6 Fa0/2   S4 Gi1/0/8 <-> S7 Fa0/2`,1],
+["Ordre d'application (à cause de VTP)",`a) Coller la PHASE 1 de chaque équipement (base, VTP, trunks, EtherChannel, STP)
+b) Attendre que les liens passent au vert, vérifier : show vtp status
+   (les clients doivent avoir reçu les VLAN 10,20,30,99,333,999)
+c) Coller la PHASE 2 de chaque équipement (SVI, ports d'accès, sécurité, DHCP...)
+
+Axes couverts : config de base, VLAN, VLAN natif 333, ParkingLot 999, trunk 802.1Q,
+DTP (nonegotiate), EtherChannel (PAgP + LACP), STP (root primary/secondary, Rapid-PVST,
+portfast, BPDU guard, root guard, cost), VTP, DHCP (serveur + snooping + limit rate),
+port-security, ports inutilisés, protected port, routage inter-VLAN / HSRP / OSPF.`,1]];
+
+D.R2=[["Configuration",base("R2","0 4")+`interface gi0/0
+ description Link to R1
+ ip address 10.0.0.2 255.255.255.252
+ no shutdown
+ exit
+interface loopback0
+ description Simulation Internet
+ ip address 10.10.1.1 255.255.255.0
+ exit
+ip route 192.168.0.0 255.255.0.0 10.0.0.1
+`+save]];
+
+const pool=v=>`ip dhcp pool VLAN${v}
+ network 192.168.${v}.0 255.255.255.0
+ default-router 192.168.${v}.1
+ dns-server 8.8.8.8
+ domain-name ista.ma
+ exit
+`;
+const rl=(i,d,ip)=>`interface ${i}
+ description Link to ${d}
+ ip address ${ip} 255.255.255.252
+ ${i!="gi0/0"?"ip dhcp relay information trusted\n ":""}no shutdown
+ exit
+`;
+D.R1=[["Configuration",base("R1","0 4")+`ip dhcp excluded-address 192.168.10.1 192.168.10.10
+ip dhcp excluded-address 192.168.20.1 192.168.20.10
+`+pool(10)+pool(20)+rl("gi0/0","R2","10.0.0.1")+rl("gi0/1","S1","10.0.1.1")+rl("gi0/2","S2","10.0.2.1")+`ip route 0.0.0.0 0.0.0.0 10.0.0.2
+router ospf 1
+ router-id 3.3.3.3
+ network 10.0.1.0 0.0.0.3 area 0
+ network 10.0.2.0 0.0.0.3 area 0
+ default-information originate
+ exit
+`+save]];
+
+const coreP2=(n,ip,link,rid,hp,p)=>cfgt+`ip routing
+interface gi1/0/1
+ description Link to R1
+ no switchport
+ ip address ${link}.2 255.255.255.252
+ no shutdown
+ exit
+`+svi(10,ip,p[0],hp)+svi(20,ip,p[1],hp)+svi(30,ip,p[0],"")+svi(99,ip,p[0],"")+ospf(rid,link+".0")+unused("gi1/0/6-24")+save;
+D.S1=[["Phase 1 (CORE - root VLAN 10,30,99)",base("S1")+vtp("server")+`vlan 10
+ name Informatique
+vlan 20
+ name Comptabilite
+vlan 30
+ name Serveurs
+vlan 99
+ name Management
+vlan 333
+ name Native
+vlan 999
+ name ParkingLot
+ exit
+`+ec("gi1/0/2-3","Po12 vers S2",12,"active")+trunk("gi1/0/4","Link to S3")+trunk("gi1/0/5","Link to S4")+`spanning-tree mode rapid-pvst
+spanning-tree vlan 10,30,99 root primary
+spanning-tree vlan 20 root secondary
+`+save],["Phase 2",coreP2(1,2,"10.0.1","1.1.1.1","10.0.1.1",[110,100])]];
+D.S2=[["Phase 1 (CORE - root VLAN 20)",base("S2")+vtp("client")+ec("gi1/0/2-3","Po12 vers S1",12,"passive")+trunk("gi1/0/4","Link to S3")+trunk("gi1/0/5","Link to S4")+`spanning-tree mode rapid-pvst
+spanning-tree vlan 20 root primary
+spanning-tree vlan 10,30,99 root secondary
+`+save],["Phase 2",coreP2(2,3,"10.0.2","2.2.2.2","10.0.2.1",[100,110])]];
+D.S3=dist("S3",3,"desirable",4).map((x,i)=>i?[x[0]+" (DISTRIBUTION - L2)",x[1]]:[x[0]+" (DISTRIBUTION - L2)",x[1]]);
+D.S4=dist("S4",4,"auto",5).map(x=>[x[0]+" (DISTRIBUTION - L2)",x[1]]);
+
+const acs=h=>base(h)+vtp("client")+uplinks();
+const s5=cfgt+mgmt(6)+snoop+acc("fa0/3","PC0",10,3,"restrict",0," switchport port-security aging time 60\n switchport port-security aging type inactivity\n switchport protected\n")
+ +acc("fa0/4","PC1",20,2,"protect",1," switchport port-security aging time 60\n switchport protected\n")+unused("fa0/5-24, gi0/1-2")+save;
+const s6=cfgt+mgmt(7)+snoop+acc("fa0/3","PC2",20,2,"restrict",1," switchport port-security aging time 60\n")+unused("fa0/4-24, gi0/1-2")+save;
+const s7=cfgt+mgmt(8)+snoop+acc("fa0/5","Server0",30,1,"shutdown",1,"",false)+unused("fa0/3-4, fa0/6-24, gi0/1-2")+save;
+D.S5=[["Phase 1 (ACCÈS) PC0 + PC1",acs("S5")],["Phase 2",s5]];
+D.S6=[["Phase 1 (ACCÈS) PC2",acs("S6")],["Phase 2",s6]];
+D.S7=[["Phase 1 (ACCÈS) Server0",acs("S7")],["Phase 2",s7]];
+
+D["Hôtes"]=[["Configuration des hôtes",`PC0, PC1, PC2 : Desktop > IP Configuration > DHCP
+Server0       : Desktop > IP Configuration > Static
+                IP 192.168.30.10  Masque 255.255.255.0
+                Passerelle 192.168.30.1  DNS 8.8.8.8`,1]];
+D["Vérifs"]=[["Commandes de vérification",`show vtp status                      (S1 server, les autres client, domaine ISTA.MA)
+show vlan brief                      (10,20,30,99,333,999 présents partout)
+show interfaces trunk                (native vlan 333)
+show interfaces fa0/1 switchport | include Negotiation   (Off)
+show etherchannel summary            (Po12 = SU / LACP ; Po34 = SU / PAgP)
+show spanning-tree vlan 10           (S1 root)   show spanning-tree vlan 20  (S2 root)
+show spanning-tree interface fa0/3 detail   (portfast + bpdu guard enabled)
+show standby brief                   (S1 active VLAN 10/30/99, S2 active VLAN 20)
+show ip ospf neighbor / show ip route
+show port-security interface fa0/3 ; show port-security address
+show ip dhcp snooping ; show ip dhcp snooping binding
+show ip dhcp binding   (sur R1)
+show interfaces status               (ports inutilisés = disabled, vlan 999)
+Tests : ping PC0 -> PC1 -> Server0 -> 10.10.1.1 (R2) ; telnet 192.168.99.x`,1],
+["Option WLAN (seulement si tu ajoutes un AP)",`Ajouter un "Access Point-PT" sur S6 Fa0/4 (mettre ce port en VLAN 20) :
+  interface fa0/4
+   switchport mode access
+   switchport access vlan 20
+   no shutdown
+Dans l'onglet Config de l'AP, Port 1 :
+  SSID aCompany - Authentication WPA2-PSK - Passphrase Cisco123! - Encryption AES
+Puis connecter un Laptop avec une carte WMP300N (PC Wireless > Connect).`,1],
+["Notes",`- Le VLAN de management est le VLAN 99 (et non le 10) car le VLAN 10 est ici Informatique.
+- Corrections du PDF 2 : "bannier motd" -> "banner motd", "ip dhcp vlan" -> "ip dhcp snooping vlan",
+  "switchportc" -> "switchport", "spanning-tree bpduguard default" -> "spanning-tree portfast bpduguard default".
+- Alternatives : "spanning-tree portfast default" (global) et "spanning-tree vlan 10 priority 24576"
+  donnent le même résultat que portfast par interface et root primary.
+- Si Packet Tracer refuse "switchport mode trunk" sur un 3650, ajoute avant :
+  switchport trunk encapsulation dot1q
+- Si tes liens S1-S2 ou S3-S4 sont en nombre différent (2 ou 3 câbles), adapte les "interface range".
+- Mots de passe identiques partout = pour le lab seulement.`,1]];
+
+/* ---------- Rendu ---------- */
+const tabs=document.getElementById("tabs"),out=document.getElementById("out");
+function show(k){
+ [...tabs.children].forEach(b=>b.setAttribute("aria-selected",b.dataset.k==k));
+ out.innerHTML="";
+ D[k].forEach(([t,c,txt])=>{
+  const b=document.createElement("section");b.className="blk";
+  const h=document.createElement("div");h.className="bh";
+  const s=document.createElement("span");s.textContent=t;h.appendChild(s);
+  if(!txt){const cp=document.createElement("button");cp.className="cp";cp.textContent="Copier";
+   cp.onclick=async()=>{try{await navigator.clipboard.writeText(c);cp.textContent="Copié";setTimeout(()=>cp.textContent="Copier",1500)}catch(e){cp.textContent="Sélectionne le texte"}};
+   h.appendChild(cp)}
+  const p=document.createElement("pre");if(txt)p.className="txt";p.textContent=c;
+  b.append(h,p);out.appendChild(b)});
+}
+Object.keys(D).forEach((k,i)=>{const b=document.createElement("button");b.textContent=k;b.dataset.k=k;b.setAttribute("role","tab");b.onclick=()=>show(k);tabs.appendChild(b)});
+show("Plan");
+</script>
+</body>
+</html>
